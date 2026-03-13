@@ -1,0 +1,293 @@
+import gc
+import os
+import random
+from contextlib import nullcontext
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torchvision.transforms import InterpolationMode
+from tqdm import tqdm
+
+# Import from src package
+from .model_loader import (
+    build_empty_model,
+    load_checkpoint_to_model,
+    load_state_dict_to_model,
+    load_model_from_checkpoint,
+    build_model_for_current_mode,
+)
+
+from .global_unstructured_pruning import prepare_base_state_dict_for_run
+
+# Import config
+from config import config as cfg
+
+# ==============================================================================
+# Section 0: Utility Functions
+# ==============================================================================
+
+def setup_seed(seed=42):
+    """Set all random seeds for reproducibility."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # Make CuDNN deterministic for stable repeated experiments.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"[Info] Random seed set to {seed}")
+
+
+def maybe_autocast(device_str):
+    """
+    Return an autocast context only when CUDA is available.
+    On CPU, return a no-op context.
+    """
+    if device_str == 'cuda':
+        return torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
+    return nullcontext()
+
+
+def validate_config():
+    """Check whether the main config options are valid."""
+    if cfg.QUANT_MODE not in ['CIM_Quant', 'Fake_Quant']:
+        raise ValueError(
+            f"Unsupported quant_mode: {cfg.QUANT_MODE}. "
+            "Please choose 'CIM_Quant' or 'Fake_Quant'."
+        )
+
+    if cfg.ENCODE_METHOD not in ['single', 'differential']:
+        raise ValueError(
+            f"Unsupported encode_method: {cfg.ENCODE_METHOD}. "
+            "Please choose 'single' or 'differential'."
+        )
+
+    if cfg.NOISE_MODE not in ['include', 'exclude']:
+        raise ValueError(
+            f"Unsupported NOISE_MODE: {cfg.NOISE_MODE}. "
+            "Please choose 'include' or 'exclude'."
+        )
+
+    if not (0.0 <= cfg.PRUNING_RATE <= 1.0):
+        raise ValueError(
+            f"Unsupported PRUNING_RATE: {cfg.PRUNING_RATE}. "
+            "Please choose a value in [0.0, 1.0]."
+        )
+
+
+# ==============================================================================
+# Section 1: Global Config (using config.py)
+# ==============================================================================
+
+# Aliases for backward compatibility in this module
+MODEL_PATH = cfg.MODEL_PATH
+DATASET_DIR = cfg.DATASET_DIR
+BATCH_SIZE = cfg.BATCH_SIZE
+NUM_WORKERS = cfg.NUM_WORKERS
+DEVICE = cfg.DEVICE
+NUM_CLASSES = cfg.NUM_CLASSES
+SEED = cfg.SEED
+MAX_TEST_SAMPLES = cfg.MAX_TEST_SAMPLES
+
+quant_mode = cfg.QUANT_MODE
+encode_method = cfg.ENCODE_METHOD
+WEIGHT_BITS = cfg.WEIGHT_BITS
+INPUT_BITS = cfg.INPUT_BITS
+ADC_BITS = cfg.ADC_BITS
+parallel_read = cfg.PARALLEL_READ
+USE_PARTIAL_SUM_QUANT = cfg.USE_PARTIAL_SUM_QUANT
+NOISE_ENABLE = cfg.NOISE_ENABLE
+NOISE_MODE = cfg.NOISE_MODE
+INCLUDE_LAYERS = cfg.INCLUDE_LAYERS
+EXCLUDE_LAYERS = cfg.EXCLUDE_LAYERS
+VARIATION_SIGMA_LIST = cfg.VARIATION_SIGMA_LIST
+PRUNING_ENABLE = cfg.PRUNING_ENABLE
+PRUNING_RATE = cfg.PRUNING_RATE
+PRUNING_EXCLUDE_KEYWORDS = cfg.PRUNING_EXCLUDE_KEYWORDS
+CIFAR100_MEAN = cfg.CIFAR100_MEAN
+CIFAR100_STD = cfg.CIFAR100_STD
+
+
+# ==============================================================================
+# Section 2: Main Evaluation Loop
+# ==============================================================================
+
+def run_inference():
+    """Main inference function."""
+    validate_config()
+    setup_seed(SEED)
+
+    print(f"Using device: {DEVICE}")
+    print(f"Quant mode: {quant_mode}")
+    print(f"Encode method: {encode_method}")
+    print("Preparing Dataset...")
+
+    test_tf = transforms.Compose([
+        transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
+    ])
+
+    test_dataset = datasets.ImageFolder(root=DATASET_DIR, transform=test_tf)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=(DEVICE == 'cuda')
+    )
+
+    # Define model loader function for pruning
+    def model_loader_fn():
+        return load_model_from_checkpoint(MODEL_PATH, num_classes=NUM_CLASSES)
+
+    # Prepare the base state_dict once.
+    base_state_dict, pruning_stats = prepare_base_state_dict_for_run(
+        model_loader_fn,
+        PRUNING_ENABLE,
+        PRUNING_RATE,
+        PRUNING_EXCLUDE_KEYWORDS
+    )
+
+    results = []
+
+    print(f"\n{'=' * 100}")
+    print("Starting Quantized Inference Sweep")
+    print(
+        f"Config: QuantMode={quant_mode} | Method={encode_method} | "
+        f"W{WEIGHT_BITS} A{INPUT_BITS} | Max Samples={MAX_TEST_SAMPLES}"
+    )
+
+    if quant_mode == 'CIM_Quant':
+        print(
+            f"CIM Config: ADC={ADC_BITS} | ParallelRead={parallel_read} | "
+            f"PSum Quant={USE_PARTIAL_SUM_QUANT}"
+        )
+    else:
+        print(
+            f"FakeQuant Config: NoiseEnable={NOISE_ENABLE} | NoiseMode={NOISE_MODE} | "
+            f"ExcludeLayers={EXCLUDE_LAYERS}"
+        )
+
+    print(
+        f"Pruning Config: Enable={PRUNING_ENABLE} | Rate={PRUNING_RATE} | "
+        f"Exclude={PRUNING_EXCLUDE_KEYWORDS}"
+    )
+    if pruning_stats is not None:
+        print(
+            f"Pruning Result: Layers={pruning_stats['pruned_layers']} | "
+            f"Weights={pruning_stats['pruned_weights']}/{pruning_stats['total_weights']} | "
+            f"Sparsity={pruning_stats['sparsity']:.4f}"
+        )
+
+    print("Base weights used for sweep: in-memory temporary state_dict")
+    print(f"Sigma Sweep List: {VARIATION_SIGMA_LIST}")
+    print(f"{'=' * 100}")
+
+    exp_idx = 0
+
+    for sigma in VARIATION_SIGMA_LIST:
+        exp_idx += 1
+        config_str = f"{quant_mode}_{encode_method}_P{PRUNING_RATE}_S{sigma}"
+        print(f"\n[Exp {exp_idx}] Config: {config_str}")
+
+        model = build_model_for_current_mode(
+            sigma=sigma,
+            base_state_dict=base_state_dict,
+            quant_mode=quant_mode,
+            encode_method=encode_method,
+            weight_bits=WEIGHT_BITS,
+            input_bits=INPUT_BITS,
+            adc_bits=ADC_BITS,
+            parallel_read=parallel_read,
+            use_partial_sum_quant=USE_PARTIAL_SUM_QUANT,
+            noise_enable=NOISE_ENABLE,
+            noise_mode=NOISE_MODE,
+            include_layers=INCLUDE_LAYERS,
+            exclude_layers=EXCLUDE_LAYERS,
+            device=DEVICE,
+            num_classes=NUM_CLASSES
+        )
+
+        correct = 0
+        total = 0
+        early_stopped_bad_acc = False
+
+        pbar = tqdm(test_loader, desc=config_str, leave=False)
+
+        with torch.no_grad():
+            for batch_idx, (images, labels) in enumerate(pbar):
+                images = images.to(DEVICE)
+                labels = labels.to(DEVICE)
+
+                with maybe_autocast(DEVICE):
+                    outputs = model(images)
+
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+                if batch_idx == 0:
+                    current_acc = 100 * correct / total
+                    if current_acc < 2.0:
+                        print(f"    [Warning] Early Stop! Acc {current_acc:.2f}% < 2%.")
+                        early_stopped_bad_acc = True
+                        break
+
+                if total >= MAX_TEST_SAMPLES:
+                    break
+
+        final_acc = 100 * correct / total
+
+        if early_stopped_bad_acc:
+            status_note = 'Bad_Acc(<2%)'
+        elif total >= MAX_TEST_SAMPLES:
+            status_note = f'Limit({total})'
+        else:
+            status_note = 'Full_Set'
+
+        results.append({
+            'QuantMode': quant_mode,
+            'EncodeMethod': encode_method,
+            'PruningRate': PRUNING_RATE if PRUNING_ENABLE else 0.0,
+            'ParallelRead': parallel_read if quant_mode == 'CIM_Quant' else 'N/A',
+            'ADC': ADC_BITS if quant_mode == 'CIM_Quant' else 'N/A',
+            'Sigma': sigma,
+            'Accuracy': final_acc,
+            'Note': status_note
+        })
+
+        print(f"-> Result: {final_acc:.2f}% (Samples: {total})")
+
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    print(f"\n{'=' * 120}")
+    print(f"Final Summary: Quantized Inference Accuracy (Max {MAX_TEST_SAMPLES} Samples)")
+    print(f"Quant Mode: {quant_mode}")
+    print(f"Encode Method: {encode_method}")
+    print(f"Pruning Enabled: {PRUNING_ENABLE}")
+    print(f"Pruning Rate: {PRUNING_RATE if PRUNING_ENABLE else 0.0}")
+    print(f"{'=' * 120}")
+    print(
+        f"{'QuantMode':<12} | {'Method':<14} | {'Pruning':<8} | {'ParallelRead':<12} | "
+        f"{'ADC':<5} | {'Sigma':<8} | {'Accuracy':<10} | {'Status'}"
+    )
+    print("-" * 130)
+
+    for res in results:
+        print(
+            f"{res['QuantMode']:<12} | {res['EncodeMethod']:<14} | "
+            f"{res['PruningRate']:<8} | {str(res['ParallelRead']):<12} | "
+            f"{str(res['ADC']):<5} | {res['Sigma']:<8} | "
+            f"{res['Accuracy']:.2f}%     | {res['Note']}"
+        )
+
+    return results
