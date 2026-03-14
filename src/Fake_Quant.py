@@ -37,13 +37,32 @@ def _should_apply_noise(layer_name, noise_enable, noise_sigma, noise_mode,
     )
 
 
-def act_dynamic_fake_quant(x, num_bits, granularity="per-token"):
-    """Apply dynamic fake quantization to activations."""
+def act_dynamic_fake_quant(x, num_bits, granularity="per-token", encoding_mode="twos_complement"):
+    """
+    Apply dynamic fake quantization to activations.
+
+    Args:
+        x: Input tensor
+        num_bits: Number of bits for quantization
+        granularity: 'per-token' or 'per-sample'
+        encoding_mode: 'twos_complement' or 'differential'
+
+    Returns:
+        For 'twos_complement': quantized tensor
+        For 'differential': tuple of (x_pos, x_neg, scale) where x = x_pos - x_neg
+    """
     if num_bits >= 32:
         return x
 
-    qmax = (2 ** (num_bits - 1)) - 1
-    qmin = -(2 ** (num_bits - 1))
+    # For both modes, use signed range for initial quantization
+    qmax_signed = (2 ** (num_bits - 1)) - 1
+    qmin_signed = -(2 ** (num_bits - 1))
+
+    # For differential mode, effective magnitude bits is num_bits - 1
+    if encoding_mode == "differential":
+        qmax_mag = (2 ** (num_bits - 1)) - 1
+    else:
+        qmax_mag = qmax_signed
 
     if granularity == "per-token":
         reduce_dims = -1
@@ -51,16 +70,25 @@ def act_dynamic_fake_quant(x, num_bits, granularity="per-token"):
         reduce_dims = [i for i in range(1, x.dim())]
 
     max_abs = x.abs().amax(dim=reduce_dims, keepdim=True)
-    scale = max_abs / float(qmax)
+    scale = max_abs / float(qmax_mag)
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
 
-    x_q = torch.round(x / scale).clamp(qmin, qmax)
-    return x_q * scale
+    if encoding_mode == "differential":
+        # First quantize to signed integer range
+        x_q = torch.round(x / scale).clamp(qmin_signed, qmax_signed)
+        # Then split into positive and negative parts (both non-negative)
+        x_pos = torch.relu(x_q)
+        x_neg = torch.relu(-x_q)
+        # Return de-quantized versions for proper computation
+        return x_pos * scale, x_neg * scale, scale
+    else:
+        x_q = torch.round(x / scale).clamp(qmin_signed, qmax_signed)
+        return x_q * scale
 
 
 def per_channel_fake_quant_weight(weight, ch_axis, num_bits, mode):
     """Apply per-channel fake quantization to weights."""
-    if mode == "single":
+    if mode == "twos_complement":
         qmin, qmax = -(2 ** (num_bits - 1)), (2 ** (num_bits - 1)) - 1
     elif mode == "differential":
         qmax = (2 ** (num_bits - 1)) - 1
@@ -68,7 +96,7 @@ def per_channel_fake_quant_weight(weight, ch_axis, num_bits, mode):
     else:
         raise ValueError(
             f"Unsupported encoding mode: {mode}. "
-            "Please choose 'single' or 'differential'."
+            "Please choose 'twos_complement' or 'differential'."
         )
 
     permute_dims = [ch_axis] + [i for i in range(weight.dim()) if i != ch_axis]
@@ -90,13 +118,13 @@ def add_bitwise_noise_generalized(q_float, sigma, num_bits, mode):
     """
     Add bit-wise noise to quantized weights.
 
-    For 'single' mode: applies noise to signed integer representation
+    For 'twos_complement' mode: applies noise to signed integer representation
     For 'differential' mode: applies noise to positive/negative split representation
     """
     if sigma <= 0:
         return q_float
 
-    if mode == "single":
+    if mode == "twos_complement":
         q_int = torch.round(q_float).to(torch.int32)
         offset = 2 ** num_bits
         q_unsigned = torch.where(q_int < 0, q_int + offset, q_int).to(torch.int32)
@@ -131,7 +159,7 @@ def add_bitwise_noise_generalized(q_float, sigma, num_bits, mode):
 
     raise ValueError(
         f"Unsupported encoding mode: {mode}. "
-        "Please choose 'single' or 'differential'."
+        "Please choose 'twos_complement' or 'differential'."
     )
 
 
@@ -145,7 +173,8 @@ class NoisyLinear(nn.Linear):
     - Optionally injects bit-wise variation noise
     """
     def __init__(self, in_features, out_features, bias=True, layer_name="",
-                 num_bits_weight=8, num_bits_act=8, encoding_mode="single",
+                 num_bits_weight=8, num_bits_act=8, encoding_mode="twos_complement",
+                 activation_encoding_mode="twos_complement",
                  noise_enable=True, noise_sigma=0.0, noise_mode="exclude",
                  include_layers=None, exclude_layers=None):
         super().__init__(in_features, out_features, bias=bias)
@@ -153,6 +182,7 @@ class NoisyLinear(nn.Linear):
         self.num_bits_weight = num_bits_weight
         self.num_bits_act = num_bits_act
         self.encoding_mode = encoding_mode
+        self.activation_encoding_mode = activation_encoding_mode
         self.noise_enable = noise_enable
         self.noise_sigma = noise_sigma
         self.noise_mode = noise_mode
@@ -160,7 +190,18 @@ class NoisyLinear(nn.Linear):
         self.exclude_layers = exclude_layers or []
 
     def forward(self, x):
-        x_q = act_dynamic_fake_quant(x, self.num_bits_act, granularity="per-token")
+        # Quantize activation with specified encoding mode
+        if self.activation_encoding_mode == "differential":
+            x_pos, x_neg, scale_x = act_dynamic_fake_quant(
+                x, self.num_bits_act, granularity="per-token",
+                encoding_mode="differential"
+            )
+            x_q = None
+        else:
+            x_q = act_dynamic_fake_quant(
+                x, self.num_bits_act, granularity="per-token",
+                encoding_mode="twos_complement"
+            )
 
         if _should_apply_noise(
             self.layer_name,
@@ -170,17 +211,25 @@ class NoisyLinear(nn.Linear):
             self.include_layers,
             self.exclude_layers
         ):
-            q, scale = per_channel_fake_quant_weight(
+            q, scale_w = per_channel_fake_quant_weight(
                 self.weight, 0, self.num_bits_weight, self.encoding_mode
             )
             q_noised = add_bitwise_noise_generalized(
                 q, self.noise_sigma, self.num_bits_weight, self.encoding_mode
             )
-            w_used = q_noised * scale.view(-1, 1)
+            w_used = q_noised * scale_w.view(-1, 1)
         else:
             w_used = self.weight
+            scale_w = None
 
-        return F.linear(x_q, w_used, self.bias)
+        # Compute output based on activation encoding mode
+        if self.activation_encoding_mode == "differential":
+            # Differential activation: A * W = (A_pos - A_neg) * W = A_pos*W - A_neg*W
+            out_pos = F.linear(x_pos, w_used, self.bias)
+            out_neg = F.linear(x_neg, w_used, None)
+            return out_pos - out_neg
+        else:
+            return F.linear(x_q, w_used, self.bias)
 
 
 class NoisyConv2d(nn.Conv2d):
@@ -194,7 +243,8 @@ class NoisyConv2d(nn.Conv2d):
     """
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0,
                  dilation=1, groups=1, bias=True, padding_mode='zeros', layer_name="",
-                 num_bits_weight=8, num_bits_act=8, encoding_mode="single",
+                 num_bits_weight=8, num_bits_act=8, encoding_mode="twos_complement",
+                 activation_encoding_mode="twos_complement",
                  noise_enable=True, noise_sigma=0.0, noise_mode="exclude",
                  include_layers=None, exclude_layers=None):
         super().__init__(
@@ -205,6 +255,7 @@ class NoisyConv2d(nn.Conv2d):
         self.num_bits_weight = num_bits_weight
         self.num_bits_act = num_bits_act
         self.encoding_mode = encoding_mode
+        self.activation_encoding_mode = activation_encoding_mode
         self.noise_enable = noise_enable
         self.noise_sigma = noise_sigma
         self.noise_mode = noise_mode
@@ -212,7 +263,17 @@ class NoisyConv2d(nn.Conv2d):
         self.exclude_layers = exclude_layers or []
 
     def forward(self, x):
-        x_q = act_dynamic_fake_quant(x, self.num_bits_act, granularity="per-sample")
+        # Quantize activation with specified encoding mode
+        if self.activation_encoding_mode == "differential":
+            x_pos, x_neg, scale_x = act_dynamic_fake_quant(
+                x, self.num_bits_act, granularity="per-sample",
+                encoding_mode="differential"
+            )
+        else:
+            x_q = act_dynamic_fake_quant(
+                x, self.num_bits_act, granularity="per-sample",
+                encoding_mode="twos_complement"
+            )
 
         if _should_apply_noise(
             self.layer_name,
@@ -222,17 +283,26 @@ class NoisyConv2d(nn.Conv2d):
             self.include_layers,
             self.exclude_layers
         ):
-            q, scale = per_channel_fake_quant_weight(
+            q, scale_w = per_channel_fake_quant_weight(
                 self.weight, 0, self.num_bits_weight, self.encoding_mode
             )
             q_noised = add_bitwise_noise_generalized(
                 q, self.noise_sigma, self.num_bits_weight, self.encoding_mode
             )
-            w_used = q_noised * scale.view(1, -1, 1, 1)
+            w_used = q_noised * scale_w.view(1, -1, 1, 1)
         else:
             w_used = self.weight
 
-        return F.conv2d(
-            x_q, w_used, self.bias, self.stride,
-            self.padding, self.dilation, self.groups
-        )
+        # Compute output based on activation encoding mode
+        if self.activation_encoding_mode == "differential":
+            # Differential activation: A * W = (A_pos - A_neg) * W = A_pos*W - A_neg*W
+            out_pos = F.conv2d(x_pos, w_used, self.bias, self.stride,
+                               self.padding, self.dilation, self.groups)
+            out_neg = F.conv2d(x_neg, w_used, None, self.stride,
+                              self.padding, self.dilation, self.groups)
+            return out_pos - out_neg
+        else:
+            return F.conv2d(
+                x_q, w_used, self.bias, self.stride,
+                self.padding, self.dilation, self.groups
+            )

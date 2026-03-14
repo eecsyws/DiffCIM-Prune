@@ -99,10 +99,11 @@ def load_model_from_checkpoint(checkpoint_path, model_name='vit_tiny_patch16_224
     return model
 
 
-def build_model_for_current_mode(sigma, base_state_dict, quant_mode, encode_method,
-                                  weight_bits, input_bits, adc_bits, parallel_read,
-                                  use_partial_sum_quant, noise_enable, noise_mode,
-                                  include_layers, exclude_layers, device, num_classes=100):
+def build_model_for_current_mode(sigma, base_state_dict, quant_mode, weight_encode_method,
+                                  activation_encode_method, weight_bits, input_bits,
+                                  adc_bits, parallel_read, use_partial_sum_quant,
+                                  noise_enable, noise_mode, include_layers,
+                                  exclude_layers, device, num_classes=100):
     """
     Build one evaluation model for the current sigma value.
 
@@ -116,7 +117,8 @@ def build_model_for_current_mode(sigma, base_state_dict, quant_mode, encode_meth
         sigma: Variation sigma value
         base_state_dict: Base state dict (pruned or original)
         quant_mode: 'CIM_Quant' or 'Fake_Quant'
-        encode_method: 'single' or 'differential'
+        weight_encode_method: 'twos_complement' or 'differential' (for weights)
+        activation_encode_method: 'twos_complement' or 'differential' (for activations)
         weight_bits: Weight quantization bits
         input_bits: Input quantization bits
         adc_bits: ADC bit resolution
@@ -146,7 +148,8 @@ def build_model_for_current_mode(sigma, base_state_dict, quant_mode, encode_meth
             input_bits=input_bits,
             weight_bits=weight_bits,
             use_partial_sum_quant=use_partial_sum_quant,
-            encode_method=encode_method
+            weight_encode_method=weight_encode_method,
+            activation_encode_method=activation_encode_method
         )
     elif quant_mode == 'Fake_Quant':
         model = wrap_fake_quant_modules(
@@ -154,7 +157,8 @@ def build_model_for_current_mode(sigma, base_state_dict, quant_mode, encode_meth
             sigma=sigma,
             weight_bits=weight_bits,
             input_bits=input_bits,
-            encode_method=encode_method,
+            weight_encode_method=weight_encode_method,
+            activation_encode_method=activation_encode_method,
             noise_enable=noise_enable,
             noise_mode=noise_mode,
             include_layers=include_layers,

@@ -34,10 +34,15 @@ MAX_TEST_SAMPLES = 10000
 #   'Fake_Quant' -> use simplified fake-quant/noisy layer replacement
 QUANT_MODE = 'CIM_Quant'
 
-# encode_method:
-#   'single' -> single-array / signed style
-#   'differential' -> differential style
-ENCODE_METHOD = 'differential'
+# Weight encoding method:
+#   'twos_complement' -> single-array / signed style (traditional)
+#   'differential' -> differential style (proposed)
+WEIGHT_ENCODE_METHOD = 'differential'
+
+# Activation encoding method:
+#   'twos_complement' -> single-array / signed style (traditional)
+#   'differential' -> differential style (proposed)
+ACTIVATION_ENCODE_METHOD = 'differential'
 
 # Shared quantization bit-width settings
 WEIGHT_BITS = 8
@@ -93,7 +98,8 @@ __all__ = [
     'MAX_TEST_SAMPLES',
     # Quantization settings
     'QUANT_MODE',
-    'ENCODE_METHOD',
+    'WEIGHT_ENCODE_METHOD',
+    'ACTIVATION_ENCODE_METHOD',
     'WEIGHT_BITS',
     'INPUT_BITS',
     'ADC_BITS',

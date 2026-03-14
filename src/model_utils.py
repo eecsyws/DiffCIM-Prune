@@ -14,17 +14,17 @@ from .CIM_Quant import CIM_Linear, CIM_SM_Linear
 from .Fake_Quant import NoisyLinear, NoisyConv2d
 
 
-def get_cim_layer_class(encode_method):
+def get_cim_layer_class(weight_encode_method):
     """
-    Select the CIM layer class according to encoding mode.
+    Select the CIM layer class according to weight encoding mode.
 
     Args:
-        encode_method: 'single' or 'differential'
+        weight_encode_method: 'twos_complement' or 'differential'
 
     Returns:
         CIM layer class (CIM_Linear or CIM_SM_Linear)
     """
-    if encode_method == 'single':
+    if weight_encode_method == 'twos_complement':
         return CIM_Linear
     return CIM_SM_Linear
 
@@ -44,9 +44,10 @@ class SplitQKV_CIM_Wrapper(nn.Module):
         input_bits: Input quantization bits
         weight_bits: Weight quantization bits
         use_partial_sum_quant: Whether to use partial sum quantization
+        activation_encode_method: 'twos_complement' or 'differential'
     """
     def __init__(self, original_linear, parallel_read, variation_sigma, adc_bits,
-                 input_bits, weight_bits, use_partial_sum_quant):
+                 input_bits, weight_bits, use_partial_sum_quant, activation_encode_method):
         super().__init__()
         in_features = original_linear.in_features
         out_features = original_linear.out_features
@@ -63,6 +64,7 @@ class SplitQKV_CIM_Wrapper(nn.Module):
             'variation_sigma': variation_sigma,
             'bias': original_linear.bias is not None,
             'use_partial_sum_quant': use_partial_sum_quant,
+            'activation_encode_method': activation_encode_method,
         }
 
         self.q = CIM_Linear(in_features, head_dim, **common_kwargs)
@@ -89,7 +91,7 @@ class SplitQKV_CIM_Wrapper(nn.Module):
 
 def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
                                   input_bits, weight_bits, use_partial_sum_quant,
-                                  encode_method):
+                                  weight_encode_method, activation_encode_method):
     """
     Replace ViT Linear layers with CIM-based layers.
 
@@ -107,12 +109,13 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
         input_bits: Input quantization bits
         weight_bits: Weight quantization bits
         use_partial_sum_quant: Whether to use partial sum quantization
-        encode_method: 'single' or 'differential'
+        weight_encode_method: 'twos_complement' or 'differential' (for weights)
+        activation_encode_method: 'twos_complement' or 'differential' (for activations)
 
     Returns:
         Modified model with CIM layers
     """
-    cim_layer_cls = get_cim_layer_class(encode_method)
+    cim_layer_cls = get_cim_layer_class(weight_encode_method)
 
     common_kwargs = {
         'input_bits': input_bits,
@@ -121,6 +124,7 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
         'rows_parallel': parallel_read,
         'variation_sigma': variation_sigma,
         'use_partial_sum_quant': use_partial_sum_quant,
+        'activation_encode_method': activation_encode_method,
     }
 
     for block in model.blocks:
@@ -129,7 +133,8 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
             original_qkv = block.attn.qkv
             block.attn.qkv = SplitQKV_CIM_Wrapper(
                 original_qkv, parallel_read, variation_sigma, adc_bits,
-                input_bits, weight_bits, use_partial_sum_quant
+                input_bits, weight_bits, use_partial_sum_quant,
+                activation_encode_method
             )
 
         # Replace projection
@@ -166,8 +171,9 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
 
 
 def wrap_fake_quant_modules(model, sigma, weight_bits, input_bits,
-                            encode_method, noise_enable, noise_mode,
-                            include_layers, exclude_layers):
+                            weight_encode_method, activation_encode_method,
+                            noise_enable, noise_mode, include_layers,
+                            exclude_layers):
     """
     Recursively replace Linear/Conv2d with Fake_quant wrapper layers.
 
@@ -178,7 +184,8 @@ def wrap_fake_quant_modules(model, sigma, weight_bits, input_bits,
         sigma: Variation sigma value
         weight_bits: Weight quantization bits
         input_bits: Input quantization bits
-        encode_method: 'single' or 'differential'
+        weight_encode_method: 'twos_complement' or 'differential' (for weights)
+        activation_encode_method: 'twos_complement' or 'differential' (for activations)
         noise_enable: Whether to enable noise
         noise_mode: 'include' or 'exclude'
         include_layers: Layers to include for noise (if mode is include)
@@ -199,7 +206,8 @@ def wrap_fake_quant_modules(model, sigma, weight_bits, input_bits,
                     layer_name=full_name,
                     num_bits_weight=weight_bits,
                     num_bits_act=input_bits,
-                    encoding_mode=encode_method,
+                    encoding_mode=weight_encode_method,
+                    activation_encoding_mode=activation_encode_method,
                     noise_enable=noise_enable,
                     noise_sigma=sigma,
                     noise_mode=noise_mode,
@@ -225,7 +233,8 @@ def wrap_fake_quant_modules(model, sigma, weight_bits, input_bits,
                     layer_name=full_name,
                     num_bits_weight=weight_bits,
                     num_bits_act=input_bits,
-                    encoding_mode=encode_method,
+                    encoding_mode=weight_encode_method,
+                    activation_encoding_mode=activation_encode_method,
                     noise_enable=noise_enable,
                     noise_sigma=sigma,
                     noise_mode=noise_mode,

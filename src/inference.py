@@ -60,10 +60,16 @@ def validate_config():
             "Please choose 'CIM_Quant' or 'Fake_Quant'."
         )
 
-    if cfg.ENCODE_METHOD not in ['single', 'differential']:
+    if cfg.WEIGHT_ENCODE_METHOD not in ['twos_complement', 'differential']:
         raise ValueError(
-            f"Unsupported encode_method: {cfg.ENCODE_METHOD}. "
-            "Please choose 'single' or 'differential'."
+            f"Unsupported WEIGHT_ENCODE_METHOD: {cfg.WEIGHT_ENCODE_METHOD}. "
+            "Please choose 'twos_complement' or 'differential'."
+        )
+
+    if cfg.ACTIVATION_ENCODE_METHOD not in ['twos_complement', 'differential']:
+        raise ValueError(
+            f"Unsupported ACTIVATION_ENCODE_METHOD: {cfg.ACTIVATION_ENCODE_METHOD}. "
+            "Please choose 'twos_complement' or 'differential'."
         )
 
     if cfg.NOISE_MODE not in ['include', 'exclude']:
@@ -94,7 +100,8 @@ SEED = cfg.SEED
 MAX_TEST_SAMPLES = cfg.MAX_TEST_SAMPLES
 
 quant_mode = cfg.QUANT_MODE
-encode_method = cfg.ENCODE_METHOD
+encode_method = cfg.WEIGHT_ENCODE_METHOD
+activation_encode_method = cfg.ACTIVATION_ENCODE_METHOD
 WEIGHT_BITS = cfg.WEIGHT_BITS
 INPUT_BITS = cfg.INPUT_BITS
 ADC_BITS = cfg.ADC_BITS
@@ -123,7 +130,8 @@ def run_inference():
 
     print(f"Using device: {DEVICE}")
     print(f"Quant mode: {quant_mode}")
-    print(f"Encode method: {encode_method}")
+    print(f"Weight encode method: {encode_method}")
+    print(f"Activation encode method: {activation_encode_method}")
     print("Preparing Dataset...")
 
     test_tf = transforms.Compose([
@@ -159,7 +167,7 @@ def run_inference():
     print(f"\n{'=' * 100}")
     print("Starting Quantized Inference Sweep")
     print(
-        f"Config: QuantMode={quant_mode} | Method={encode_method} | "
+        f"Config: QuantMode={quant_mode} | W_Encode={encode_method} | A_Encode={activation_encode_method} | "
         f"W{WEIGHT_BITS} A{INPUT_BITS} | Max Samples={MAX_TEST_SAMPLES}"
     )
 
@@ -193,14 +201,15 @@ def run_inference():
 
     for sigma in VARIATION_SIGMA_LIST:
         exp_idx += 1
-        config_str = f"{quant_mode}_{encode_method}_P{PRUNING_RATE}_S{sigma}"
+        config_str = f"{quant_mode}_W{encode_method}_A{activation_encode_method}_P{PRUNING_RATE}_S{sigma}"
         print(f"\n[Exp {exp_idx}] Config: {config_str}")
 
         model = build_model_for_current_mode(
             sigma=sigma,
             base_state_dict=base_state_dict,
             quant_mode=quant_mode,
-            encode_method=encode_method,
+            weight_encode_method=encode_method,
+            activation_encode_method=activation_encode_method,
             weight_bits=WEIGHT_BITS,
             input_bits=INPUT_BITS,
             adc_bits=ADC_BITS,
@@ -253,7 +262,8 @@ def run_inference():
 
         results.append({
             'QuantMode': quant_mode,
-            'EncodeMethod': encode_method,
+            'WeightEncodeMethod': encode_method,
+            'ActivationEncodeMethod': activation_encode_method,
             'PruningRate': PRUNING_RATE if PRUNING_ENABLE else 0.0,
             'ParallelRead': parallel_read if quant_mode == 'CIM_Quant' else 'N/A',
             'ADC': ADC_BITS if quant_mode == 'CIM_Quant' else 'N/A',
@@ -269,22 +279,23 @@ def run_inference():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    print(f"\n{'=' * 120}")
+    print(f"\n{'=' * 140}")
     print(f"Final Summary: Quantized Inference Accuracy (Max {MAX_TEST_SAMPLES} Samples)")
     print(f"Quant Mode: {quant_mode}")
-    print(f"Encode Method: {encode_method}")
+    print(f"Weight Encode Method: {encode_method}")
+    print(f"Activation Encode Method: {activation_encode_method}")
     print(f"Pruning Enabled: {PRUNING_ENABLE}")
     print(f"Pruning Rate: {PRUNING_RATE if PRUNING_ENABLE else 0.0}")
-    print(f"{'=' * 120}")
+    print(f"{'=' * 140}")
     print(
-        f"{'QuantMode':<12} | {'Method':<14} | {'Pruning':<8} | {'ParallelRead':<12} | "
+        f"{'QuantMode':<12} | {'W_Encode':<14} | {'A_Encode':<14} | {'Pruning':<8} | {'ParallelRead':<12} | "
         f"{'ADC':<5} | {'Sigma':<8} | {'Accuracy':<10} | {'Status'}"
     )
-    print("-" * 130)
+    print("-" * 150)
 
     for res in results:
         print(
-            f"{res['QuantMode']:<12} | {res['EncodeMethod']:<14} | "
+            f"{res['QuantMode']:<12} | {res['WeightEncodeMethod']:<14} | {res['ActivationEncodeMethod']:<14} | "
             f"{res['PruningRate']:<8} | {str(res['ParallelRead']):<12} | "
             f"{str(res['ADC']):<5} | {res['Sigma']:<8} | "
             f"{res['Accuracy']:.2f}%     | {res['Note']}"
