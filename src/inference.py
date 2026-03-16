@@ -39,6 +39,30 @@ def setup_seed(seed=42):
     # Make CuDNN deterministic for stable repeated experiments.
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def collect_activity_stats(model):
+    """
+    Collect activity statistics from CIM layers.
+
+    Returns:
+        dict with keys: total_1x1_count, total_1_count, total_weight_1_count
+    """
+    total_1x1 = 0
+    total_1 = 0
+    total_w1 = 0
+
+    for module in model.modules():
+        if hasattr(module, 'enable_activity_stats') and module.enable_activity_stats:
+            total_1x1 += module.total_1x1_count
+            total_1 += module.total_1_count
+            total_w1 += module.total_weight_1_count
+
+    return {
+        'total_1x1_count': total_1x1,
+        'total_1_count': total_1,
+        'total_weight_1_count': total_w1
+    }
     print(f"[Info] Random seed set to {seed}")
 
 
@@ -115,6 +139,7 @@ VARIATION_SIGMA_LIST = cfg.VARIATION_SIGMA_LIST
 PRUNING_ENABLE = cfg.PRUNING_ENABLE
 PRUNING_RATE = cfg.PRUNING_RATE
 PRUNING_EXCLUDE_KEYWORDS = cfg.PRUNING_EXCLUDE_KEYWORDS
+ENABLE_ACTIVITY_STATS = cfg.ENABLE_ACTIVITY_STATS
 CIFAR100_MEAN = cfg.CIFAR100_MEAN
 CIFAR100_STD = cfg.CIFAR100_STD
 
@@ -220,7 +245,8 @@ def run_inference():
             include_layers=INCLUDE_LAYERS,
             exclude_layers=EXCLUDE_LAYERS,
             device=DEVICE,
-            num_classes=NUM_CLASSES
+            num_classes=NUM_CLASSES,
+            enable_activity_stats=ENABLE_ACTIVITY_STATS
         )
 
         correct = 0
@@ -260,6 +286,14 @@ def run_inference():
         else:
             status_note = 'Full_Set'
 
+        # Collect activity statistics if enabled
+        activity_stats = None
+        if ENABLE_ACTIVITY_STATS:
+            activity_stats = collect_activity_stats(model)
+            print(f"    Activity: 1x1={activity_stats['total_1x1_count']:.0f}, "
+                  f"Act_1={activity_stats['total_1_count']:.0f}, "
+                  f"Weight_1={activity_stats['total_weight_1_count']:.0f}")
+
         results.append({
             'QuantMode': quant_mode,
             'WeightEncodeMethod': encode_method,
@@ -269,6 +303,9 @@ def run_inference():
             'ADC': ADC_BITS if quant_mode == 'CIM_Quant' else 'N/A',
             'Sigma': sigma,
             'Accuracy': final_acc,
+            'Total_1x1': activity_stats['total_1x1_count'] if activity_stats else 'N/A',
+            'Total_Act_1': activity_stats['total_1_count'] if activity_stats else 'N/A',
+            'Total_Weight_1': activity_stats['total_weight_1_count'] if activity_stats else 'N/A',
             'Note': status_note
         })
 

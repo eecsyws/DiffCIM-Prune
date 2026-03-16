@@ -103,7 +103,8 @@ def build_model_for_current_mode(sigma, base_state_dict, quant_mode, weight_enco
                                   activation_encode_method, weight_bits, input_bits,
                                   adc_bits, parallel_read, use_partial_sum_quant,
                                   noise_enable, noise_mode, include_layers,
-                                  exclude_layers, device, num_classes=100):
+                                  exclude_layers, device, num_classes=100,
+                                  enable_activity_stats=False):
     """
     Build one evaluation model for the current sigma value.
 
@@ -149,7 +150,8 @@ def build_model_for_current_mode(sigma, base_state_dict, quant_mode, weight_enco
             weight_bits=weight_bits,
             use_partial_sum_quant=use_partial_sum_quant,
             weight_encode_method=weight_encode_method,
-            activation_encode_method=activation_encode_method
+            activation_encode_method=activation_encode_method,
+            enable_activity_stats=enable_activity_stats
         )
     elif quant_mode == 'Fake_Quant':
         model = wrap_fake_quant_modules(

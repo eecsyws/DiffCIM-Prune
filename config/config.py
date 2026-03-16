@@ -11,8 +11,13 @@ import torch
 # Section 1: Path Settings
 # ==============================================================================
 
-MODEL_PATH = "./checkpoints/vit_tiny_cifar100_finetune.pt"
-DATASET_DIR = './data/cifar100/test'  # 数据集路径，根据实际情况修改
+import os
+
+# Get the project root directory (parent of config directory)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+MODEL_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "vit_tiny_cifar100_finetune.pt")
+DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'cifar100', 'test')
 
 # ==============================================================================
 # Section 2: Runtime Settings
@@ -75,6 +80,13 @@ PRUNING_RATE = 0.2
 PRUNING_EXCLUDE_KEYWORDS = ['patch_embed', 'head']
 
 # ==============================================================================
+# Section 4b: Activity Statistics Settings
+# ==============================================================================
+
+# Enable activity statistics (count 1x1 interactions for energy analysis)
+ENABLE_ACTIVITY_STATS = False
+
+# ==============================================================================
 # Section 5: Dataset Normalization Settings
 # ==============================================================================
 
@@ -114,6 +126,8 @@ __all__ = [
     'PRUNING_ENABLE',
     'PRUNING_RATE',
     'PRUNING_EXCLUDE_KEYWORDS',
+    # Activity statistics settings
+    'ENABLE_ACTIVITY_STATS',
     # Dataset settings
     'CIFAR100_MEAN',
     'CIFAR100_STD',

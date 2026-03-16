@@ -184,8 +184,6 @@ def prepare_base_state_dict_for_run(model_loader_fn, pruning_enable, pruning_rat
     pruning_stats = apply_global_unstructured_pruning(base_model, pruning_rate, exclude_keywords)
     base_state_dict = clone_state_dict_to_cpu(base_model)
 
-    print("[Pruning] Temporary pruned weights kept in memory only. No local file will be saved.")
-
     del base_model
     import gc
     gc.collect()

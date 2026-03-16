@@ -45,9 +45,11 @@ class SplitQKV_CIM_Wrapper(nn.Module):
         weight_bits: Weight quantization bits
         use_partial_sum_quant: Whether to use partial sum quantization
         activation_encode_method: 'twos_complement' or 'differential'
+        enable_activity_stats: Whether to enable activity counting
     """
     def __init__(self, original_linear, parallel_read, variation_sigma, adc_bits,
-                 input_bits, weight_bits, use_partial_sum_quant, activation_encode_method):
+                 input_bits, weight_bits, use_partial_sum_quant, activation_encode_method,
+                 enable_activity_stats=False):
         super().__init__()
         in_features = original_linear.in_features
         out_features = original_linear.out_features
@@ -65,6 +67,7 @@ class SplitQKV_CIM_Wrapper(nn.Module):
             'bias': original_linear.bias is not None,
             'use_partial_sum_quant': use_partial_sum_quant,
             'activation_encode_method': activation_encode_method,
+            'enable_activity_stats': enable_activity_stats,
         }
 
         self.q = CIM_Linear(in_features, head_dim, **common_kwargs)
@@ -91,7 +94,8 @@ class SplitQKV_CIM_Wrapper(nn.Module):
 
 def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
                                   input_bits, weight_bits, use_partial_sum_quant,
-                                  weight_encode_method, activation_encode_method):
+                                  weight_encode_method, activation_encode_method,
+                                  enable_activity_stats=False):
     """
     Replace ViT Linear layers with CIM-based layers.
 
@@ -111,6 +115,7 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
         use_partial_sum_quant: Whether to use partial sum quantization
         weight_encode_method: 'twos_complement' or 'differential' (for weights)
         activation_encode_method: 'twos_complement' or 'differential' (for activations)
+        enable_activity_stats: Whether to enable activity counting
 
     Returns:
         Modified model with CIM layers
@@ -125,6 +130,7 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
         'variation_sigma': variation_sigma,
         'use_partial_sum_quant': use_partial_sum_quant,
         'activation_encode_method': activation_encode_method,
+        'enable_activity_stats': enable_activity_stats,
     }
 
     for block in model.blocks:
@@ -134,7 +140,7 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
             block.attn.qkv = SplitQKV_CIM_Wrapper(
                 original_qkv, parallel_read, variation_sigma, adc_bits,
                 input_bits, weight_bits, use_partial_sum_quant,
-                activation_encode_method
+                activation_encode_method, enable_activity_stats
             )
 
         # Replace projection

@@ -22,7 +22,8 @@ class CIM_Linear(nn.Module):
                  input_bits=8, weight_bits=8, adc_bits=10,
                  rows_parallel=64, variation_sigma=0.0,
                  use_partial_sum_quant=False,
-                 activation_encode_method="twos_complement"):
+                 activation_encode_method="twos_complement",
+                 enable_activity_stats=False):
         super(CIM_Linear, self).__init__()
 
         self.in_features = in_features
@@ -34,6 +35,7 @@ class CIM_Linear(nn.Module):
         self.variation_sigma = variation_sigma
         self.use_partial_sum_quant = use_partial_sum_quant
         self.activation_encode_method = activation_encode_method
+        self.enable_activity_stats = enable_activity_stats
 
         # For differential activation encoding, effective input bits is input_bits - 1
         if self.activation_encode_method == "differential":
@@ -45,6 +47,11 @@ class CIM_Linear(nn.Module):
             self.alpha = self.rows_parallel / (2 ** self.adc_bits)
         else:
             self.alpha = 1.0
+
+        # Statistics for activity (1x1 interaction counting)
+        self.total_1x1_count = 0
+        self.total_1_count = 0
+        self.total_weight_1_count = 0
 
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
         if bias:
@@ -130,6 +137,12 @@ class CIM_Linear(nn.Module):
         total_tokens, _ = x_flat.shape
         out_channels, _ = w_q.shape
 
+        # Reset statistics if enabled
+        if self.enable_activity_stats:
+            self.total_1x1_count = 0
+            self.total_1_count = 0
+            self.total_weight_1_count = 0
+
         # Handle activation encoding based on method
         if self.activation_encode_method == "differential":
             x_pos, x_neg, scale_x = self.fake_quantize_input_per_token_differential(x_flat)
@@ -142,7 +155,9 @@ class CIM_Linear(nn.Module):
             X_pos_planes = None
             X_neg_planes = None
 
-        W_planes = self.int2bit(w_q, self.weight_bits, is_signed=True)
+        # Get original weight bits BEFORE variation (for activity counting)
+        W_planes_original = self.int2bit(w_q, self.weight_bits, is_signed=True)
+        W_planes = W_planes_original.clone()
 
         if self.variation_sigma > 0:
             W_planes = self.apply_variation(W_planes)
@@ -157,6 +172,13 @@ class CIM_Linear(nn.Module):
                 row_end = min(row_start + self.rows_parallel, self.in_features)
 
                 w_chunk = w_plane[:, row_start:row_end]
+                # Original weight bits (before variation) for activity counting
+                w_chunk_original = W_planes_original[w_bit][:, row_start:row_end]
+
+                # Determine threshold for "1" counting
+                # If variation is applied, use 0.5 as threshold; otherwise use 1.0
+                w_threshold = 0.5 if self.variation_sigma > 0 else 0.5
+
                 row_chunk_sum = torch.zeros_like(output_int)
 
                 if self.activation_encode_method == "differential":
@@ -171,11 +193,26 @@ class CIM_Linear(nn.Module):
                             analog_val_pos = torch.matmul(x_pos_chunk_bit, w_chunk.t())
                         digital_val_pos = self.adc_quantize(analog_val_pos)
 
+                        # Activity statistics for positive part
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            # Use matrix multiplication: (tokens, chunk) @ (chunk, out) -> (tokens, out)
+                            self.total_1x1_count += torch.matmul(x_pos_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_pos_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
+
                         # Negative part contribution (subtracted)
                         x_neg_chunk_bit = x_neg_chunk_all[x_bit]
                         with _maybe_autocast(x_neg_chunk_bit):
                             analog_val_neg = torch.matmul(x_neg_chunk_bit, w_chunk.t())
                         digital_val_neg = self.adc_quantize(analog_val_neg)
+
+                        # Activity statistics for negative part
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            self.total_1x1_count += torch.matmul(x_neg_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_neg_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
 
                         # Differential: positive - negative
                         row_chunk_sum += (digital_val_pos - digital_val_neg) * (2 ** x_bit)
@@ -190,6 +227,15 @@ class CIM_Linear(nn.Module):
                             analog_val = torch.matmul(x_chunk_bit, w_chunk.t())
 
                         digital_val = self.adc_quantize(analog_val)
+
+                        # Activity statistics
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            # Use matrix multiplication: (tokens, chunk) @ (chunk, out) -> (tokens, out)
+                            # Then sum all elements to get total 1x1 interactions
+                            self.total_1x1_count += torch.matmul(x_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
 
                         if x_bit == (self.input_bits - 1):
                             row_chunk_sum -= digital_val * (2 ** x_bit)
@@ -224,7 +270,8 @@ class CIM_SM_Linear(nn.Module):
                  input_bits=8, weight_bits=8, adc_bits=10,
                  rows_parallel=64, variation_sigma=0.0,
                  use_partial_sum_quant=False,
-                 activation_encode_method="twos_complement"):
+                 activation_encode_method="twos_complement",
+                 enable_activity_stats=False):
         super(CIM_SM_Linear, self).__init__()
 
         self.in_features = in_features
@@ -237,6 +284,7 @@ class CIM_SM_Linear(nn.Module):
         self.variation_sigma = variation_sigma
         self.use_partial_sum_quant = use_partial_sum_quant
         self.activation_encode_method = activation_encode_method
+        self.enable_activity_stats = enable_activity_stats
 
         # For differential activation encoding, effective input bits is input_bits - 1
         if self.activation_encode_method == "differential":
@@ -248,6 +296,11 @@ class CIM_SM_Linear(nn.Module):
             self.alpha = self.rows_parallel / (2 ** self.adc_bits)
         else:
             self.alpha = 1.0
+
+        # Statistics for activity (1x1 interaction counting)
+        self.total_1x1_count = 0
+        self.total_1_count = 0
+        self.total_weight_1_count = 0
 
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
         if bias:
@@ -339,6 +392,12 @@ class CIM_SM_Linear(nn.Module):
         total_tokens, _ = x_flat.shape
         out_channels_doubled, _ = w_stack.shape
 
+        # Reset statistics if enabled
+        if self.enable_activity_stats:
+            self.total_1x1_count = 0
+            self.total_1_count = 0
+            self.total_weight_1_count = 0
+
         # Handle activation encoding based on method
         if self.activation_encode_method == "differential":
             x_pos, x_neg, scale_x = self.fake_quantize_input_per_token_differential(x_flat)
@@ -351,21 +410,28 @@ class CIM_SM_Linear(nn.Module):
             X_pos_planes = None
             X_neg_planes = None
 
-        W_planes = self.int2bit(w_stack, self.weight_storage_bits, is_signed=False)
+        # Get original weight bits BEFORE variation (for activity counting)
+        W_planes_original = self.int2bit(w_stack, self.weight_storage_bits, is_signed=False)
+        W_planes = W_planes_original.clone()
 
         if self.variation_sigma > 0:
             W_planes = self.apply_variation(W_planes)
 
         output_stack = torch.zeros((total_tokens, out_channels_doubled), device=input.device)
 
+        # Threshold for "1" counting
+        w_threshold = 0.5 if self.variation_sigma > 0 else 0.5
+
         for w_bit in range(self.weight_storage_bits):
             w_plane = W_planes[w_bit]
+            w_plane_original = W_planes_original[w_bit]
             w_bit_partial = torch.zeros_like(output_stack)
 
             for row_start in range(0, self.in_features, self.rows_parallel):
                 row_end = min(row_start + self.rows_parallel, self.in_features)
 
                 w_chunk = w_plane[:, row_start:row_end]
+                w_chunk_original = w_plane_original[:, row_start:row_end]
                 row_chunk_sum = torch.zeros_like(output_stack)
 
                 if self.activation_encode_method == "differential":
@@ -380,11 +446,26 @@ class CIM_SM_Linear(nn.Module):
                             analog_val_pos = torch.matmul(x_pos_chunk_bit, w_chunk.t())
                         digital_val_pos = self.adc_quantize(analog_val_pos)
 
+                        # Activity statistics for positive part
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            # Use matrix multiplication: (tokens, chunk) @ (chunk, out) -> (tokens, out)
+                            self.total_1x1_count += torch.matmul(x_pos_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_pos_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
+
                         # Negative part contribution (subtracted)
                         x_neg_chunk_bit = x_neg_chunk_all[x_bit]
                         with _maybe_autocast(x_neg_chunk_bit):
                             analog_val_neg = torch.matmul(x_neg_chunk_bit, w_chunk.t())
                         digital_val_neg = self.adc_quantize(analog_val_neg)
+
+                        # Activity statistics for negative part
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            self.total_1x1_count += torch.matmul(x_neg_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_neg_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
 
                         # Differential: positive - negative
                         row_chunk_sum += (digital_val_pos - digital_val_neg) * (2 ** x_bit)
@@ -399,6 +480,14 @@ class CIM_SM_Linear(nn.Module):
                             analog_val = torch.matmul(x_chunk_bit, w_chunk.t())
 
                         digital_val = self.adc_quantize(analog_val)
+
+                        # Activity statistics
+                        if self.enable_activity_stats:
+                            w_active = (w_chunk_original > w_threshold).float()
+                            # Use matrix multiplication: (tokens, chunk) @ (chunk, out) -> (tokens, out)
+                            self.total_1x1_count += torch.matmul(x_chunk_bit, w_active.t()).sum().item()
+                            self.total_1_count += x_chunk_bit.sum().item()
+                            self.total_weight_1_count += w_active.sum().item()
 
                         if x_bit == (self.input_bits - 1):
                             row_chunk_sum -= digital_val * (2 ** x_bit)
