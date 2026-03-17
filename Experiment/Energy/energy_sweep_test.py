@@ -68,6 +68,7 @@ ADC_BITS = 6
 PARALLEL_READ = 64
 USE_PARTIAL_SUM_QUANT = False
 ENABLE_ACTIVITY_STATS = True  # Enable activity counting
+ENABLE_SPARSITY_STATS = False  # Disable sparsity stats for energy sweep
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_CLASSES = 100
 NUM_WORKERS = 2
@@ -153,7 +154,8 @@ def run_single_experiment(
         exclude_layers=['patch_embed.proj', 'head'],
         device=DEVICE,
         num_classes=NUM_CLASSES,
-        enable_activity_stats=ENABLE_ACTIVITY_STATS
+        enable_activity_stats=ENABLE_ACTIVITY_STATS,
+        enable_sparsity_stats=ENABLE_SPARSITY_STATS
     )
 
     # Run inference on 1 sample

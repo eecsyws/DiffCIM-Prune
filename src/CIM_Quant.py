@@ -23,7 +23,8 @@ class CIM_Linear(nn.Module):
                  rows_parallel=64, variation_sigma=0.0,
                  use_partial_sum_quant=False,
                  activation_encode_method="twos_complement",
-                 enable_activity_stats=False):
+                 enable_activity_stats=False,
+                 enable_sparsity_stats=False):
         super(CIM_Linear, self).__init__()
 
         self.in_features = in_features
@@ -36,8 +37,10 @@ class CIM_Linear(nn.Module):
         self.use_partial_sum_quant = use_partial_sum_quant
         self.activation_encode_method = activation_encode_method
         self.enable_activity_stats = enable_activity_stats
+        self.enable_sparsity_stats = enable_sparsity_stats
 
         # For differential activation encoding, effective input bits is input_bits - 1
+        # X_pos and X_neg each have (input_bits - 1) bits, total = 2 * (input_bits - 1) = 14 bits
         if self.activation_encode_method == "differential":
             self.input_storage_bits = input_bits - 1
         else:
@@ -52,6 +55,10 @@ class CIM_Linear(nn.Module):
         self.total_1x1_count = 0
         self.total_1_count = 0
         self.total_weight_1_count = 0
+
+        # Statistics for per-bit-plane sparsity
+        self.weight_density = None  # List of (bit_idx, density) for each weight bit
+        self.activation_density = None  # List of (bit_idx, density) for each activation bit
 
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
         if bias:
@@ -158,6 +165,37 @@ class CIM_Linear(nn.Module):
         # Get original weight bits BEFORE variation (for activity counting)
         W_planes_original = self.int2bit(w_q, self.weight_bits, is_signed=True)
         W_planes = W_planes_original.clone()
+
+        # Compute weight density per bit plane (probability of 1) (before variation)
+        if self.enable_sparsity_stats:
+            weight_density_list = []
+            for bit_idx in range(self.weight_bits):
+                w_plane = W_planes_original[bit_idx]
+                # Density = fraction of ones (probability of 1)
+                density = (w_plane == 1).float().mean().item()
+                weight_density_list.append((bit_idx, density))
+            self.weight_density = weight_density_list
+
+            # Compute activation density per bit plane (probability of 1)
+            # For differential: total bits = 2 * (input_bits - 1) = 14 for INT8
+            activation_density_list = []
+            if self.activation_encode_method == "differential":
+                # Positive activation bits (bits 0 to input_bits-2)
+                for bit_idx in range(self.input_storage_bits):
+                    pos_plane = X_pos_planes[bit_idx]
+                    density = (pos_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx, density))
+                # Negative activation bits (bits input_bits-1 to 2*input_bits-3)
+                for bit_idx in range(self.input_storage_bits):
+                    neg_plane = X_neg_planes[bit_idx]
+                    density = (neg_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx + self.input_storage_bits, density))
+            else:
+                for bit_idx in range(self.input_bits):
+                    a_plane = X_planes[bit_idx]
+                    density = (a_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx, density))
+            self.activation_density = activation_density_list
 
         if self.variation_sigma > 0:
             W_planes = self.apply_variation(W_planes)
@@ -271,7 +309,8 @@ class CIM_SM_Linear(nn.Module):
                  rows_parallel=64, variation_sigma=0.0,
                  use_partial_sum_quant=False,
                  activation_encode_method="twos_complement",
-                 enable_activity_stats=False):
+                 enable_activity_stats=False,
+                 enable_sparsity_stats=False):
         super(CIM_SM_Linear, self).__init__()
 
         self.in_features = in_features
@@ -285,8 +324,10 @@ class CIM_SM_Linear(nn.Module):
         self.use_partial_sum_quant = use_partial_sum_quant
         self.activation_encode_method = activation_encode_method
         self.enable_activity_stats = enable_activity_stats
+        self.enable_sparsity_stats = enable_sparsity_stats
 
         # For differential activation encoding, effective input bits is input_bits - 1
+        # X_pos and X_neg each have (input_bits - 1) bits, total = 2 * (input_bits - 1) = 14 bits
         if self.activation_encode_method == "differential":
             self.input_storage_bits = input_bits - 1
         else:
@@ -301,6 +342,10 @@ class CIM_SM_Linear(nn.Module):
         self.total_1x1_count = 0
         self.total_1_count = 0
         self.total_weight_1_count = 0
+
+        # Statistics for per-bit-plane sparsity
+        self.weight_density = None  # List of (bit_idx, density) for each weight bit
+        self.activation_density = None  # List of (bit_idx, density) for each activation bit
 
         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
         if bias:
@@ -413,6 +458,51 @@ class CIM_SM_Linear(nn.Module):
         # Get original weight bits BEFORE variation (for activity counting)
         W_planes_original = self.int2bit(w_stack, self.weight_storage_bits, is_signed=False)
         W_planes = W_planes_original.clone()
+
+        # Compute weight density per bit plane (probability of 1) (before variation)
+        # For differential: w_stack = [w_pos, w_neg], need to separate them
+        if self.enable_sparsity_stats:
+            weight_density_list = []
+            out_channels = self.out_features
+
+            # Separate positive and negative weight bit planes
+            W_pos_planes = self.int2bit(w_pos, self.weight_storage_bits, is_signed=False)
+            W_neg_planes = self.int2bit(w_neg, self.weight_storage_bits, is_signed=False)
+
+            # Positive weight bit planes (bits 0 to storage_bits-1)
+            for bit_idx in range(self.weight_storage_bits):
+                w_plane = W_pos_planes[bit_idx]
+                density = (w_plane == 1).float().mean().item()
+                weight_density_list.append((bit_idx, density))
+
+            # Negative weight bit planes (bits storage_bits to 2*storage_bits-1)
+            for bit_idx in range(self.weight_storage_bits):
+                w_plane = W_neg_planes[bit_idx]
+                density = (w_plane == 1).float().mean().item()
+                weight_density_list.append((bit_idx + self.weight_storage_bits, density))
+
+            self.weight_density = weight_density_list
+
+            # Compute activation density per bit plane (probability of 1)
+            # For differential: total bits = 2 * (input_bits - 1) = 14 for INT8
+            activation_density_list = []
+            if self.activation_encode_method == "differential":
+                # Positive activation bits (bits 0 to input_bits-2)
+                for bit_idx in range(self.input_storage_bits):
+                    pos_plane = X_pos_planes[bit_idx]
+                    density = (pos_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx, density))
+                # Negative activation bits (bits input_bits-1 to 2*input_bits-3)
+                for bit_idx in range(self.input_storage_bits):
+                    neg_plane = X_neg_planes[bit_idx]
+                    density = (neg_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx + self.input_storage_bits, density))
+            else:
+                for bit_idx in range(self.input_bits):
+                    a_plane = X_planes[bit_idx]
+                    density = (a_plane == 1).float().mean().item()
+                    activation_density_list.append((bit_idx, density))
+            self.activation_density = activation_density_list
 
         if self.variation_sigma > 0:
             W_planes = self.apply_variation(W_planes)

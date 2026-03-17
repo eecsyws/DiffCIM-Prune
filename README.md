@@ -30,13 +30,30 @@ DiffCIM-Prune/
 │   └── config.py                        # 配置文件
 ├── src/
 │   ├── __init__.py
-│   ├── CIM_Quant.py                     # 严格 CIM 行为仿真
+│   ├── CIM_Quant.py                     # 严格 CIM 行为仿真（含稀疏度统计）
 │   ├── Fake_Quant.py                    # 简化版 CIM 评估
 │   ├── quant_layers.py                  # 重新导出（向后兼容）
 │   ├── global_unstructured_pruning.py   # 全局非结构化剪枝
 │   ├── model_utils.py                   # 模型替换工具
 │   ├── model_loader.py                  # 模型加载
-│   └── inference.py                     # 推理逻辑
+│   └── inference.py                     # 推理逻辑（含统计收集）
+├── Experiment/                          # 实验脚本
+│   ├── Accuracy/                        # 精度扫描实验
+│   │   ├── accuracy_sweep_test.py
+│   │   └── Results/
+│   ├── Energy/                          # 能量扫描实验
+│   │   ├── energy_sweep_test.py
+│   │   └── Results/
+│   └── Sparsity/                        # 稀疏度扫描实验
+│       ├── sparsity_sweep_test.py
+│       └── Results/
+├── Figure/                              # 可视化脚本
+│   ├── Accuracy/
+│   │   └── accuracy_figure.py
+│   ├── Energy/
+│   │   └── energy_figure.py
+│   └── Sparsity/
+│       └── sparsity_figure.py
 ├── main.py                              # 主入口
 ├── Methods.md                           # 方法论介绍
 └── README.md
@@ -81,6 +98,15 @@ pip install torch torchvision timm numpy tqdm
 | `NOISE_MODE` | 噪声模式：`include` 或 `exclude` |
 | `INCLUDE_LAYERS` | 包含噪声的层 |
 | `EXCLUDE_LAYERS` | 排除噪声的层 |
+
+### 统计功能参数
+
+| 参数 | 说明 |
+|------|------|
+| `ENABLE_ACTIVITY_STATS` | 是否启用导通单元统计（统计 "1×1" 交互次数，用于能量分析） |
+| `ENABLE_SPARSITY_STATS` | 是否启用稀疏度统计（统计每层每个bit为1的概率） |
+
+> 注：稀疏度统计仅在 `QUANT_MODE = 'CIM_Quant'` 时支持。
 
 ## 使用方法
 
@@ -225,6 +251,75 @@ $$
 - 减少激活侧高位有效导通次数；
 - 降低激活位与权重位之间的高位 `1 × 1` 交互；
 - 减弱权重侧 FeFET Variation 对最终输出的误差放大。
+
+---
+
+## 实验脚本
+
+项目提供了三个实验脚本，分别用于精度、能量和稀疏度的系统评估：
+
+### 1. Accuracy Sweep（精度扫描）
+
+```bash
+python Experiment/Accuracy/accuracy_sweep_test.py
+```
+
+- 扫描配置：4种编码组合 × 5种剪枝率 × 5种sigma = 100个实验
+- 输出：`Experiment/Accuracy/Results/accuracy_results.csv`
+
+### 2. Energy Sweep（能量扫描）
+
+```bash
+python Experiment/Energy/energy_sweep_test.py
+```
+
+- 扫描4种编码组合，sigma固定为0，batch_size=1
+- 输出：`Experiment/Energy/Results/energy_results.csv`
+- 统计导通单元数量（1×1交互次数）
+
+### 3. Sparsity Sweep（稀疏度扫描）
+
+```bash
+python Experiment/Sparsity/sparsity_sweep_test.py
+```
+
+- 扫描4种编码组合 × 5种剪枝率 = 20个实验
+- 输出：`Experiment/Sparsity/Results/sparsity_results.csv`
+- 统计每层每个bit为1的概率（weight density, activation density）
+
+---
+
+## 可视化
+
+项目提供了三个绘图脚本，用于生成论文图表：
+
+### 1. Accuracy Figures
+
+```bash
+python Figure/Accuracy/accuracy_figure.py
+```
+
+- `accuracy_vs_sigma.png`: 精度 vs Sigma（4种编码对比）
+- `accuracy_vs_pruning.png`: 精度 vs 剪枝率
+
+### 2. Energy Figure
+
+```bash
+python Figure/Energy/energy_figure.py
+```
+
+- `energy.png`: 导通单元总数对比（5个柱子，含剪枝）
+- 显示阵列能耗降低倍数
+
+### 3. Sparsity Figure
+
+```bash
+python Figure/Sparsity/sparsity_figure.py
+```
+
+- `sparsity.png`: 每bit平面密度对比
+- 5组柱子，每组3个小柱（Weight, Activation, Weight×Activation）
+- 显示ADC精度降低位数
 
 ---
 

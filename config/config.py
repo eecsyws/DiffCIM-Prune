@@ -13,11 +13,9 @@ import torch
 
 import os
 
-# Get the project root directory (parent of config directory)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MODEL_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "vit_tiny_cifar100_finetune.pt")
-DATASET_DIR = os.path.join(PROJECT_ROOT, 'data', 'cifar100', 'test')
+MODEL_PATH = '/lustre/home/2200012654/model/timm/vit_tiny_cifar100/vit_tiny_cifar100_finetune.pt'
+DATASET_DIR = '/lustre/home/2200012654/dataset/cifar100/test'
 
 # ==============================================================================
 # Section 2: Runtime Settings
@@ -75,8 +73,8 @@ VARIATION_SIGMA_LIST = [0, 0.05, 0.1, 0.15, 0.2]
 # Target:
 #   - only nn.Linear.weight
 #   - exclude layers whose names contain 'patch_embed' or 'head'
-PRUNING_ENABLE = True
-PRUNING_RATE = 0.2
+PRUNING_ENABLE = False
+PRUNING_RATE = 0.0
 PRUNING_EXCLUDE_KEYWORDS = ['patch_embed', 'head']
 
 # ==============================================================================
@@ -85,6 +83,9 @@ PRUNING_EXCLUDE_KEYWORDS = ['patch_embed', 'head']
 
 # Enable activity statistics (count 1x1 interactions for energy analysis)
 ENABLE_ACTIVITY_STATS = False
+
+# Enable per-bit-plane sparsity statistics (weight & activation)
+ENABLE_SPARSITY_STATS = False
 
 # ==============================================================================
 # Section 5: Dataset Normalization Settings
@@ -128,6 +129,7 @@ __all__ = [
     'PRUNING_EXCLUDE_KEYWORDS',
     # Activity statistics settings
     'ENABLE_ACTIVITY_STATS',
+    'ENABLE_SPARSITY_STATS',
     # Dataset settings
     'CIFAR100_MEAN',
     'CIFAR100_STD',

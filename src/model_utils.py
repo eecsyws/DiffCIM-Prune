@@ -44,12 +44,14 @@ class SplitQKV_CIM_Wrapper(nn.Module):
         input_bits: Input quantization bits
         weight_bits: Weight quantization bits
         use_partial_sum_quant: Whether to use partial sum quantization
-        activation_encode_method: 'twos_complement' or 'differential'
+        weight_encode_method: 'twos_complement' or 'differential' (for weights)
+        activation_encode_method: 'twos_complement' or 'differential' (for activations)
         enable_activity_stats: Whether to enable activity counting
     """
     def __init__(self, original_linear, parallel_read, variation_sigma, adc_bits,
-                 input_bits, weight_bits, use_partial_sum_quant, activation_encode_method,
-                 enable_activity_stats=False):
+                 input_bits, weight_bits, use_partial_sum_quant,
+                 weight_encode_method, activation_encode_method,
+                 enable_activity_stats=False, enable_sparsity_stats=False):
         super().__init__()
         in_features = original_linear.in_features
         out_features = original_linear.out_features
@@ -57,7 +59,9 @@ class SplitQKV_CIM_Wrapper(nn.Module):
 
         assert out_features % 3 == 0, "QKV output features must be divisible by 3"
 
-        # Use CIM_Linear for single encoding (not differential for QKV wrapper)
+        # Select CIM layer class based on weight encoding method
+        cim_cls = CIM_Linear if weight_encode_method == 'twos_complement' else CIM_SM_Linear
+
         common_kwargs = {
             'input_bits': input_bits,
             'weight_bits': weight_bits,
@@ -68,11 +72,12 @@ class SplitQKV_CIM_Wrapper(nn.Module):
             'use_partial_sum_quant': use_partial_sum_quant,
             'activation_encode_method': activation_encode_method,
             'enable_activity_stats': enable_activity_stats,
+            'enable_sparsity_stats': enable_sparsity_stats,
         }
 
-        self.q = CIM_Linear(in_features, head_dim, **common_kwargs)
-        self.k = CIM_Linear(in_features, head_dim, **common_kwargs)
-        self.v = CIM_Linear(in_features, head_dim, **common_kwargs)
+        self.q = cim_cls(in_features, head_dim, **common_kwargs)
+        self.k = cim_cls(in_features, head_dim, **common_kwargs)
+        self.v = cim_cls(in_features, head_dim, **common_kwargs)
 
         w = original_linear.weight.data
         self.q.weight.data = w[0:head_dim, :].clone()
@@ -95,7 +100,7 @@ class SplitQKV_CIM_Wrapper(nn.Module):
 def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
                                   input_bits, weight_bits, use_partial_sum_quant,
                                   weight_encode_method, activation_encode_method,
-                                  enable_activity_stats=False):
+                                  enable_activity_stats=False, enable_sparsity_stats=False):
     """
     Replace ViT Linear layers with CIM-based layers.
 
@@ -131,17 +136,25 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
         'use_partial_sum_quant': use_partial_sum_quant,
         'activation_encode_method': activation_encode_method,
         'enable_activity_stats': enable_activity_stats,
+        'enable_sparsity_stats': enable_sparsity_stats,
     }
 
+    block_idx = 0
     for block in model.blocks:
         # Replace QKV
         if hasattr(block.attn, 'qkv'):
             original_qkv = block.attn.qkv
-            block.attn.qkv = SplitQKV_CIM_Wrapper(
+            new_qkv = SplitQKV_CIM_Wrapper(
                 original_qkv, parallel_read, variation_sigma, adc_bits,
                 input_bits, weight_bits, use_partial_sum_quant,
-                activation_encode_method, enable_activity_stats
+                weight_encode_method, activation_encode_method,
+                enable_activity_stats, enable_sparsity_stats
             )
+            # Add layer names to sub-modules (q, k, v)
+            new_qkv.q.layer_name = f'block{block_idx}.attn.q'
+            new_qkv.k.layer_name = f'block{block_idx}.attn.k'
+            new_qkv.v.layer_name = f'block{block_idx}.attn.v'
+            block.attn.qkv = new_qkv
 
         # Replace projection
         if hasattr(block.attn, 'proj'):
@@ -152,6 +165,7 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
                 bias=original_proj.bias is not None,
                 **common_kwargs
             )
+            new_proj.layer_name = f'block{block_idx}.attn.proj'
             new_proj.weight.data = original_proj.weight.data.clone()
             if original_proj.bias is not None:
                 new_proj.bias.data = original_proj.bias.data.clone()
@@ -168,10 +182,13 @@ def replace_vit_layers_with_cim(model, parallel_read, variation_sigma, adc_bits,
                         bias=original_fc.bias is not None,
                         **common_kwargs
                     )
+                    new_fc.layer_name = f'block{block_idx}.mlp.{fc_name}'
                     new_fc.weight.data = original_fc.weight.data.clone()
                     if original_fc.bias is not None:
                         new_fc.bias.data = original_fc.bias.data.clone()
                     setattr(block.mlp, fc_name, new_fc)
+
+        block_idx += 1
 
     return model
 

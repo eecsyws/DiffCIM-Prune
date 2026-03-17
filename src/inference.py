@@ -63,7 +63,45 @@ def collect_activity_stats(model):
         'total_1_count': total_1,
         'total_weight_1_count': total_w1
     }
-    print(f"[Info] Random seed set to {seed}")
+
+
+def collect_sparsity_stats(model):
+    """
+    Collect per-bit-plane density statistics from CIM layers.
+    Density = probability of bit being 1.
+
+    Returns:
+        dict with keys:
+        - weight_density: list of (bit_idx, density) for each weight bit plane
+        - activation_density: list of (bit_idx, density) for each activation bit plane
+    """
+    all_weight_density = []
+    all_activation_density = []
+
+    for module in model.modules():
+        if hasattr(module, 'enable_sparsity_stats') and module.enable_sparsity_stats:
+            if hasattr(module, 'weight_density') and module.weight_density is not None:
+                layer_name = getattr(module, 'layer_name', None)
+                if layer_name is None:
+                    # Try to get name from parent's children
+                    layer_name = module.name if hasattr(module, 'name') else 'unknown'
+                all_weight_density.append({
+                    'layer': layer_name,
+                    'data': module.weight_density
+                })
+            if hasattr(module, 'activation_density') and module.activation_density is not None:
+                layer_name = getattr(module, 'layer_name', None)
+                if layer_name is None:
+                    layer_name = module.name if hasattr(module, 'name') else 'unknown'
+                all_activation_density.append({
+                    'layer': layer_name,
+                    'data': module.activation_density
+                })
+
+    return {
+        'weight_density': all_weight_density,
+        'activation_density': all_activation_density
+    }
 
 
 def maybe_autocast(device_str):
@@ -123,6 +161,8 @@ NUM_CLASSES = cfg.NUM_CLASSES
 SEED = cfg.SEED
 MAX_TEST_SAMPLES = cfg.MAX_TEST_SAMPLES
 
+print(f"[Info] Random seed set to {SEED}")
+
 quant_mode = cfg.QUANT_MODE
 encode_method = cfg.WEIGHT_ENCODE_METHOD
 activation_encode_method = cfg.ACTIVATION_ENCODE_METHOD
@@ -140,6 +180,7 @@ PRUNING_ENABLE = cfg.PRUNING_ENABLE
 PRUNING_RATE = cfg.PRUNING_RATE
 PRUNING_EXCLUDE_KEYWORDS = cfg.PRUNING_EXCLUDE_KEYWORDS
 ENABLE_ACTIVITY_STATS = cfg.ENABLE_ACTIVITY_STATS
+ENABLE_SPARSITY_STATS = cfg.ENABLE_SPARSITY_STATS
 CIFAR100_MEAN = cfg.CIFAR100_MEAN
 CIFAR100_STD = cfg.CIFAR100_STD
 
@@ -246,7 +287,8 @@ def run_inference():
             exclude_layers=EXCLUDE_LAYERS,
             device=DEVICE,
             num_classes=NUM_CLASSES,
-            enable_activity_stats=ENABLE_ACTIVITY_STATS
+            enable_activity_stats=ENABLE_ACTIVITY_STATS,
+            enable_sparsity_stats=ENABLE_SPARSITY_STATS
         )
 
         correct = 0
@@ -294,6 +336,50 @@ def run_inference():
                   f"Act_1={activity_stats['total_1_count']:.0f}, "
                   f"Weight_1={activity_stats['total_weight_1_count']:.0f}")
 
+        # Collect density statistics if enabled (density = probability of bit=1)
+        density_stats = None
+        avg_weight_density = 'N/A'
+        avg_activation_density = 'N/A'
+        if ENABLE_SPARSITY_STATS:
+            density_stats = collect_sparsity_stats(model)
+
+            # Compute average density across all layers
+            if density_stats['weight_density']:
+                all_w_density = []
+                for ws in density_stats['weight_density']:
+                    all_w_density.extend([d for _, d in ws['data']])
+                avg_weight_density = sum(all_w_density) / len(all_w_density) if all_w_density else 'N/A'
+                # Print weight density per bit plane for ALL layers
+                print(f"    Weight Density (per bit, avg={avg_weight_density:.3f}):")
+                for ws in density_stats['weight_density']:
+                    data = ws['data']
+                    # If even number of bits (differential encoding), split into + and -
+                    if len(data) % 2 == 0:
+                        half = len(data) // 2
+                        pos_bits = [f"bit{i}+={d:.3f}" for i, (_, d) in enumerate(data[:half])]
+                        neg_bits = [f"bit{i}-={d:.3f}" for i, (_, d) in enumerate(data[half:])]
+                        print(f"      {ws['layer']}: " + ", ".join(pos_bits + neg_bits))
+                    else:
+                        print(f"      {ws['layer']}: " + ", ".join([f"bit{b}={d:.3f}" for b, d in data]))
+
+            if density_stats['activation_density']:
+                all_a_density = []
+                for as_ in density_stats['activation_density']:
+                    all_a_density.extend([d for _, d in as_['data']])
+                avg_activation_density = sum(all_a_density) / len(all_a_density) if all_a_density else 'N/A'
+                # Print activation density per bit plane for ALL layers
+                print(f"    Activation Density (per bit, avg={avg_activation_density:.3f}):")
+                for as_ in density_stats['activation_density']:
+                    data = as_['data']
+                    # If even number of bits (differential encoding), split into + and -
+                    if len(data) % 2 == 0:
+                        half = len(data) // 2
+                        pos_bits = [f"bit{i}+={d:.3f}" for i, (_, d) in enumerate(data[:half])]
+                        neg_bits = [f"bit{i}-={d:.3f}" for i, (_, d) in enumerate(data[half:])]
+                        print(f"      {as_['layer']}: " + ", ".join(pos_bits + neg_bits))
+                    else:
+                        print(f"      {as_['layer']}: " + ", ".join([f"bit{b}={d:.3f}" for b, d in data]))
+
         results.append({
             'QuantMode': quant_mode,
             'WeightEncodeMethod': encode_method,
@@ -306,6 +392,8 @@ def run_inference():
             'Total_1x1': activity_stats['total_1x1_count'] if activity_stats else 'N/A',
             'Total_Act_1': activity_stats['total_1_count'] if activity_stats else 'N/A',
             'Total_Weight_1': activity_stats['total_weight_1_count'] if activity_stats else 'N/A',
+            'AvgWeightDensity': avg_weight_density,
+            'AvgActivationDensity': avg_activation_density,
             'Note': status_note
         })
 
